@@ -4,6 +4,16 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.pydantic_v1 import BaseModel, Field
 from typing import Optional, List
 
+# Récupération automatique de la clé depuis les secrets Streamlit
+# Si elle n'est pas dans les secrets, on la demande à l'utilisateur (fallback)
+if "OPENAI_API_KEY" in st.secrets:
+    api_key = st.secrets["OPENAI_API_KEY"]
+else:
+    api_key = st.sidebar.text_input("Votre Clé API OpenAI", type="password")
+
+if api_key:
+    # ... le reste du code reste identique ...
+    
 # 1. Configuration de la page
 st.set_page_config(page_title="ShieldFlow Demo", page_icon="🛡️", layout="wide")
 
@@ -74,4 +84,5 @@ else:
 
 # Footer
 st.markdown("---")
+
 st.markdown("© 2025 ShieldFlow.io - API de nettoyage de données par IA.")
