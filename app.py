@@ -1,113 +1,133 @@
 import streamlit as st
+import time
+import re
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import Optional
 
-# --- 1. CONFIGURATION DE LA PAGE (DOIT ÊTRE EN PREMIER) ---
-st.set_page_config(
-    page_title="ShieldFlow Demo",
-    page_icon="🛡️",
-    layout="wide"
-)
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="ShieldFlow Hybrid Core", page_icon="🛡️", layout="wide")
 
-# --- 2. GESTION DE LA CLÉ API (SECRETS OU SIDEBAR) ---
+# --- 2. MOTEUR HYBRIDE (FONCTIONS DE PERFORMANCE) ---
+
+# NIVEAU 1 : Validation Regex (Ultra-Rapide < 1ms)
+def quick_validate_email(text: str) -> bool:
+    """Vérifie s'il y a au moins un semblant d'email dans le texte."""
+    # Regex simple : quelque chose @ quelque chose . quelque chose
+    match = re.search(r"[^@]+@[^@]+\.[^@]+", text)
+    return bool(match)
+
+# NIVEAU 2 : Cache (Simulation Redis avec Session State)
+if "cache_db" not in st.session_state:
+    st.session_state["cache_db"] = {}
+
+def check_cache(raw_text: str):
+    """Vérifie si on a déjà traité cette demande exacte."""
+    return st.session_state["cache_db"].get(raw_text)
+
+def save_to_cache(raw_text: str, result_data: dict):
+    """Sauvegarde le résultat pour la prochaine fois."""
+    st.session_state["cache_db"][raw_text] = result_data
+
+# --- 3. MODÈLE DE DONNÉES ---
+class CleanedContact(BaseModel):
+    full_name: Optional[str] = Field(description="Prénom et Nom corrigés")
+    email: Optional[str] = Field(description="Email valide")
+    job_title: Optional[str] = Field(description="Titre du poste original")
+    standardized_role: Optional[str] = Field(description="Rôle standardisé (ex: CEO, Sales)")
+    company_name: Optional[str] = Field(description="Nom de l'entreprise")
+    company_industry: Optional[str] = Field(description="Secteur d'activité")
+    risk_flag: bool = Field(description="Vrai si risqué")
+    risk_reason: Optional[str] = Field(description="Raison du risque")
+    processing_source: str = Field(description="Source du traitement: 'CACHE' ou 'AI'")
+
+# --- 4. INTERFACE ---
+st.title("🛡️ ShieldFlow Core")
+st.caption("Architecture Hybride : Regex -> Cache -> IA")
+
+# Gestion Clé API
 api_key = None
-
-# On vérifie d'abord si la clé est dans les secrets de Streamlit Cloud
 if "OPENAI_API_KEY" in st.secrets:
     api_key = st.secrets["OPENAI_API_KEY"]
 else:
-    # Sinon, on affiche un champ dans la barre latérale pour la rentrer manuellement
-    api_key = st.sidebar.text_input("Votre Clé API OpenAI", type="password")
-    if not api_key:
-        st.sidebar.warning("Veuillez entrer une clé API pour continuer.")
+    api_key = st.sidebar.text_input("Clé API OpenAI", type="password")
 
-# --- 3. INTERFACE PRINCIPALE ---
-st.title("🛡️ ShieldFlow.io")
-st.subheader("Transformez le chaos en données structurées.")
-st.markdown(
-    """
-    Collez n'importe quel texte (signature d'email, note de réunion, ligne CRM sale) 
-    et voyez l'IA le nettoyer, le standardiser et l'enrichir en temps réel.
-    """
-)
+if not api_key:
+    st.warning("Entrez une clé API pour activer le Niveau 3 (IA).")
+    st.stop()
 
-# --- 4. DÉFINITION DU MODÈLE DE DONNÉES (SCHEMA) ---
-class CleanedContact(BaseModel):
-    full_name: Optional[str] = Field(description="Prénom et Nom corrigés et formatés (Title Case)")
-    email: Optional[str] = Field(description="Email valide et corrigé si nécessaire (ex: gmai.com -> gmail.com)")
-    job_title: Optional[str] = Field(description="Titre du poste original tel qu'il apparait dans le texte")
-    standardized_role: Optional[str] = Field(description="Rôle standardisé en Anglais (ex: CEO, CTO, VP Sales, Engineer)")
-    company_name: Optional[str] = Field(description="Nom de l'entreprise identifiée")
-    company_industry: Optional[str] = Field(description="Secteur d'activité déduit de l'entreprise (ex: SaaS, Retail, Aerospace)")
-    risk_flag: bool = Field(description="Mettre à True si la donnée semble fausse, spam, ou insultante")
-    risk_reason: Optional[str] = Field(description="Raison du risque si risk_flag est True")
+# Initialisation IA (Lazy loading)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
+structured_llm = llm.with_structured_output(CleanedContact)
 
-# --- 5. LOGIQUE DE L'APPLICATION ---
+# --- 5. ZONE DE TEST ---
+col1, col2 = st.columns(2)
 
-if api_key:
-    # Initialisation du modèle seulement si la clé est présente
-    try:
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
-        structured_llm = llm.with_structured_output(CleanedContact)
-    except Exception as e:
-        st.error(f"Erreur de configuration API : {e}")
-        st.stop()
+with col1:
+    st.markdown("### 📥 Input")
+    raw_text = st.text_area("Donnée brute", height=200, placeholder="Ex: martin@airbus..com")
+    run_btn = st.button("Lancer le traitement ⚡", type="primary")
 
-    col1, col2 = st.columns(2)
+with col2:
+    st.markdown("### 📤 Output & Performance")
+    
+    if run_btn and raw_text:
+        start_time = time.time()
+        final_result = None
+        step_log = []
 
-    with col1:
-        st.markdown("### 📥 Donnée Brute (Input)")
-        raw_text = st.text_area(
-            "Collez votre texte ici...", 
-            height=300, 
-            placeholder="Exemple : c'est martin.gros@airbus..com directeur achat basé a toulouse"
-        )
-        analyze_btn = st.button("Nettoyer & Enrichir ✨", type="primary")
-
-    with col2:
-        st.markdown("### 📤 Donnée ShieldFlow (API Output)")
+        # --- ÉTAPE 1 : REGEX (The Gatekeeper) ---
+        step_log.append("1️⃣ Regex Check...")
+        if not quick_validate_email(raw_text):
+            # REJET IMMÉDIAT
+            end_time = time.time()
+            duration = (end_time - start_time) * 1000
+            st.error(f"❌ Rejeté par le Niveau 1 (Pas d'email détecté). Temps: {duration:.2f}ms")
+            st.stop()
         
-        if analyze_btn and raw_text:
-            with st.spinner("Analyse ShieldFlow en cours..."):
-                try:
-                    # Le Prompt Système qui guide l'IA
-                    system_prompt = """Tu es ShieldFlow, une API experte en nettoyage de données B2B.
-                    Analyse le texte suivant avec une précision extrême.
-                    1. Extrais les informations de contact.
-                    2. Corrige les fautes de frappe évidentes dans les emails (ex: gmai.com, outlok.fr).
-                    3. Déduis le secteur d'activité de l'entreprise si possible.
-                    4. Standardise le poste en anglais (ex: 'Directeur des ventes' -> 'Sales Director').
-                    Si le texte est du spam ou n'a aucun sens, active le risk_flag."""
-                    
-                    prompt = ChatPromptTemplate.from_messages([
-                        ("system", system_prompt),
-                        ("human", raw_text),
-                    ])
-                    
-                    # Exécution de la chaîne
-                    chain = prompt | structured_llm
-                    result = chain.invoke({})
-                    
-                    # Affichage du résultat JSON
-                    st.json(result.dict())
-                    
-                    # Feedback visuel
-                    if result.risk_flag:
-                        st.error(f"⚠️ Risque détecté : {result.risk_reason}")
-                    else:
-                        st.success("✅ Donnée validée et enrichie")
-                        
-                except Exception as e:
-                    st.error(f"Une erreur est survenue lors de l'analyse : {e}")
+        # --- ÉTAPE 2 : CACHE (The Memory) ---
+        step_log.append("2️⃣ Cache Check...")
+        cached_result = check_cache(raw_text)
+        
+        if cached_result:
+            # HIT CACHE
+            final_result = cached_result
+            final_result['processing_source'] = "CACHE (Redis)"
+            step_log.append("✅ Trouvé en cache !")
+        else:
+            # --- ÉTAPE 3 : IA (The Brain) ---
+            step_log.append("3️⃣ AI Processing (GPT-4o-mini)...")
+            try:
+                system_prompt = "Tu es ShieldFlow. Nettoie cette donnée B2B. Sois précis."
+                prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", raw_text)])
+                chain = prompt | structured_llm
+                
+                res = chain.invoke({})
+                final_result = res.dict()
+                final_result['processing_source'] = "AI (Generative)"
+                
+                # Mise en cache pour la prochaine fois
+                save_to_cache(raw_text, final_result)
+                
+            except Exception as e:
+                st.error(f"Erreur IA: {e}")
+                st.stop()
 
-else:
-    # Message d'accueil si pas de clé
-    st.info("👋 Bienvenue sur la démo ShieldFlow. L'application est prête à démarrer.")
-    if "OPENAI_API_KEY" not in st.secrets:
-        st.warning("Aucune clé API détectée dans les secrets. Veuillez en entrer une dans la barre latérale.")
+        # --- RÉSULTATS ---
+        end_time = time.time()
+        total_duration = (end_time - start_time) * 1000 # en ms
+        
+        # Affichage du Chrono
+        if total_duration < 500:
+            st.success(f"⏱️ Temps Total : **{total_duration:.0f} ms** (Ultra-Rapide)")
+        elif total_duration < 1500:
+            st.warning(f"⏱️ Temps Total : **{total_duration:.0f} ms** (Standard IA)")
+        else:
+            st.error(f"⏱️ Temps Total : **{total_duration:.0f} ms** (Lent)")
 
-# Footer
-st.markdown("---")
-st.markdown("© 2025 ShieldFlow.io - Intelligent Data Firewall.")
+        # Affichage des étapes
+        st.caption(" > ".join(step_log))
+        
+        # Affichage JSON
+        st.json(final_result)
