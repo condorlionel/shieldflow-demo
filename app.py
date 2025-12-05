@@ -1,133 +1,254 @@
 import streamlit as st
+import pandas as pd
 import time
-import re
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import create_model, Field
+from typing import Optional, List
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="ShieldFlow Hybrid Core", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="ShieldFlow Enterprise", page_icon="🛡️", layout="wide")
 
-# --- 2. MOTEUR HYBRIDE (FONCTIONS DE PERFORMANCE) ---
+# --- 2. GESTION DE L'ÉTAT ---
+if "custom_fields" not in st.session_state:
+    st.session_state["custom_fields"] = [
+        {"name": "full_name", "desc": "Prénom et Nom corrigés"},
+        {"name": "email", "desc": "Email valide"},
+        {"name": "company", "desc": "Nom de l'entreprise"},
+        {"name": "job_title", "desc": "Poste standardisé"},
+    ]
 
-# NIVEAU 1 : Validation Regex (Ultra-Rapide < 1ms)
-def quick_validate_email(text: str) -> bool:
-    """Vérifie s'il y a au moins un semblant d'email dans le texte."""
-    # Regex simple : quelque chose @ quelque chose . quelque chose
-    match = re.search(r"[^@]+@[^@]+\.[^@]+", text)
-    return bool(match)
+if "batch_results" not in st.session_state:
+    st.session_state["batch_results"] = None
 
-# NIVEAU 2 : Cache (Simulation Redis avec Session State)
-if "cache_db" not in st.session_state:
-    st.session_state["cache_db"] = {}
+# --- 3. FONCTIONS CORE ---
 
-def check_cache(raw_text: str):
-    """Vérifie si on a déjà traité cette demande exacte."""
-    return st.session_state["cache_db"].get(raw_text)
+def create_dynamic_model(fields_list):
+    """Crée le modèle Pydantic avec le Score de Confiance intégré."""
+    field_definitions = {
+        "risk_flag": (bool, Field(description="Vrai si risqué (spam, fake)")),
+        "risk_reason": (Optional[str], Field(description="Raison du risque")),
+        # LE CŒUR DU TRAFFIC LIGHT SYSTEM :
+        "confidence_score": (int, Field(description="Score de 0 à 100 sur la qualité et la complétude de la donnée."))
+    }
+    
+    for field in fields_list:
+        field_definitions[field["name"]] = (Optional[str], Field(description=field["desc"]))
+    
+    return create_model('DynamicContact', **field_definitions)
 
-def save_to_cache(raw_text: str, result_data: dict):
-    """Sauvegarde le résultat pour la prochaine fois."""
-    st.session_state["cache_db"][raw_text] = result_data
-
-# --- 3. MODÈLE DE DONNÉES ---
-class CleanedContact(BaseModel):
-    full_name: Optional[str] = Field(description="Prénom et Nom corrigés")
-    email: Optional[str] = Field(description="Email valide")
-    job_title: Optional[str] = Field(description="Titre du poste original")
-    standardized_role: Optional[str] = Field(description="Rôle standardisé (ex: CEO, Sales)")
-    company_name: Optional[str] = Field(description="Nom de l'entreprise")
-    company_industry: Optional[str] = Field(description="Secteur d'activité")
-    risk_flag: bool = Field(description="Vrai si risqué")
-    risk_reason: Optional[str] = Field(description="Raison du risque")
-    processing_source: str = Field(description="Source du traitement: 'CACHE' ou 'AI'")
+def get_traffic_light(score, threshold):
+    """Détermine la couleur en fonction du seuil."""
+    if score >= threshold:
+        return "🟢 VALIDÉ", "success"
+    elif score < 40: # Seuil critique fixe pour le rouge
+        return "🔴 REJETÉ", "error"
+    else:
+        return "🟠 À RÉVISER", "warning"
 
 # --- 4. INTERFACE ---
-st.title("🛡️ ShieldFlow Core")
-st.caption("Architecture Hybride : Regex -> Cache -> IA")
 
-# Gestion Clé API
-api_key = None
-if "OPENAI_API_KEY" in st.secrets:
-    api_key = st.secrets["OPENAI_API_KEY"]
-else:
-    api_key = st.sidebar.text_input("Clé API OpenAI", type="password")
+st.title("🛡️ ShieldFlow Enterprise")
 
+# --- SIDEBAR : CONFIGURATION ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    
+    # 1. CLÉ API
+    api_key = None
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    else:
+        api_key = st.text_input("Clé API OpenAI", type="password")
+
+    st.divider()
+    
+    # 2. TRAFFIC LIGHT SETTINGS
+    st.subheader("🚦 Seuils de Validation")
+    confidence_threshold = st.slider(
+        "Seuil d'acceptation", 
+        min_value=50, max_value=100, value=80,
+        help="Score minimum pour être validé (Vert)."
+    )
+    
+    st.divider()
+    
+    # 3. SCHEMA BUILDER (Gestion Complète)
+    st.subheader("🏗️ Structure de Données")
+    
+    # A. Formulaire d'Ajout
+    with st.expander("➕ Ajouter un champ", expanded=False):
+        with st.form("add_field_form"):
+            new_name = st.text_input("Nom (ex: budget)")
+            new_desc = st.text_input("Description (ex: Budget max)")
+            submitted = st.form_submit_button("Ajouter")
+            
+            if submitted and new_name and new_desc:
+                st.session_state["custom_fields"].append({"name": new_name, "desc": new_desc})
+                st.rerun()
+
+    # B. Liste des Champs Actifs (Visualiser & Supprimer)
+    st.markdown("#### Champs Actifs :")
+    
+    # On itère sur une copie de la liste pour éviter les bugs d'index pendant la suppression
+    for i, field in enumerate(st.session_state["custom_fields"]):
+        col_a, col_b = st.columns([5, 1])
+        
+        # Affichage du nom et description en tooltip
+        col_a.markdown(f"**{field['name']}**")
+        col_a.caption(f"_{field['desc']}_")
+        
+        # Bouton de suppression
+        if col_b.button("🗑️", key=f"del_{i}"):
+            st.session_state["custom_fields"].pop(i)
+            st.rerun()
+
+    # C. Bouton Reset
+    if st.button("🔄 Reset Standard B2B"):
+        st.session_state["custom_fields"] = [
+            {"name": "full_name", "desc": "Prénom et Nom corrigés"},
+            {"name": "email", "desc": "Email valide"},
+            {"name": "company", "desc": "Nom de l'entreprise"},
+            {"name": "job_title", "desc": "Poste standardisé"},
+        ]
+        st.rerun()
+        
 if not api_key:
-    st.warning("Entrez une clé API pour activer le Niveau 3 (IA).")
+    st.warning("Veuillez entrer une clé API.")
     st.stop()
 
-# Initialisation IA (Lazy loading)
+# INITIALISATION IA
+DynamicModel = create_dynamic_model(st.session_state["custom_fields"])
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
-structured_llm = llm.with_structured_output(CleanedContact)
+structured_llm = llm.with_structured_output(DynamicModel)
 
-# --- 5. ZONE DE TEST ---
-col1, col2 = st.columns(2)
+# --- TABS : UNITAIRE vs BATCH ---
+tab1, tab2 = st.tabs(["⚡ Test Unitaire (Temps Réel)", "📂 Batch & Review (Fichiers)"])
 
-with col1:
-    st.markdown("### 📥 Input")
-    raw_text = st.text_area("Donnée brute", height=200, placeholder="Ex: martin@airbus..com")
-    run_btn = st.button("Lancer le traitement ⚡", type="primary")
-
-with col2:
-    st.markdown("### 📤 Output & Performance")
+# === TAB 1 : TEST UNITAIRE ===
+with tab1:
+    col1, col2 = st.columns(2)
+    with col1:
+        raw_text = st.text_area("Input", height=150, placeholder="Martin, martin@airbus..com")
+        run_btn = st.button("Analyser", type="primary")
     
-    if run_btn and raw_text:
-        start_time = time.time()
-        final_result = None
-        step_log = []
-
-        # --- ÉTAPE 1 : REGEX (The Gatekeeper) ---
-        step_log.append("1️⃣ Regex Check...")
-        if not quick_validate_email(raw_text):
-            # REJET IMMÉDIAT
-            end_time = time.time()
-            duration = (end_time - start_time) * 1000
-            st.error(f"❌ Rejeté par le Niveau 1 (Pas d'email détecté). Temps: {duration:.2f}ms")
-            st.stop()
-        
-        # --- ÉTAPE 2 : CACHE (The Memory) ---
-        step_log.append("2️⃣ Cache Check...")
-        cached_result = check_cache(raw_text)
-        
-        if cached_result:
-            # HIT CACHE
-            final_result = cached_result
-            final_result['processing_source'] = "CACHE (Redis)"
-            step_log.append("✅ Trouvé en cache !")
-        else:
-            # --- ÉTAPE 3 : IA (The Brain) ---
-            step_log.append("3️⃣ AI Processing (GPT-4o-mini)...")
-            try:
-                system_prompt = "Tu es ShieldFlow. Nettoie cette donnée B2B. Sois précis."
+    with col2:
+        if run_btn and raw_text:
+            with st.spinner("Analyse..."):
+                # Prompt
+                field_names = ", ".join([f["name"] for f in st.session_state["custom_fields"]])
+                system_prompt = f"""Tu es un auditeur de données. Extrais: {field_names}.
+                Evalue la qualité de la donnée (confidence_score 0-100).
+                Si l'email est invalide ou le nom manquant, baisse le score."""
+                
                 prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", raw_text)])
                 chain = prompt | structured_llm
-                
                 res = chain.invoke({})
-                final_result = res.dict()
-                final_result['processing_source'] = "AI (Generative)"
                 
-                # Mise en cache pour la prochaine fois
-                save_to_cache(raw_text, final_result)
+                # Traffic Light Logic
+                status_text, status_color = get_traffic_light(res.confidence_score, confidence_threshold)
                 
-            except Exception as e:
-                st.error(f"Erreur IA: {e}")
-                st.stop()
+                # Affichage Visuel
+                st.metric("Score de Confiance", f"{res.confidence_score}/100", status_text)
+                
+                if status_color == "success":
+                    st.success("Donnée prête pour export CRM")
+                elif status_color == "warning":
+                    st.warning("Nécessite une validation humaine")
+                else:
+                    st.error("Donnée critique / Spam")
+                
+                st.json(res.dict())
 
-        # --- RÉSULTATS ---
-        end_time = time.time()
-        total_duration = (end_time - start_time) * 1000 # en ms
+# === TAB 2 : BATCH & REVIEW ===
+with tab2:
+    st.markdown("### Import CSV & Nettoyage en masse")
+    
+    uploaded_file = st.file_uploader("Uploader un CSV (Max 5 lignes pour la démo)", type=["csv"])
+    
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file)
+        st.dataframe(df.head(), use_container_width=True)
         
-        # Affichage du Chrono
-        if total_duration < 500:
-            st.success(f"⏱️ Temps Total : **{total_duration:.0f} ms** (Ultra-Rapide)")
-        elif total_duration < 1500:
-            st.warning(f"⏱️ Temps Total : **{total_duration:.0f} ms** (Standard IA)")
-        else:
-            st.error(f"⏱️ Temps Total : **{total_duration:.0f} ms** (Lent)")
+        if st.button("Lancer le traitement Batch 🚀"):
+            results = []
+            progress_bar = st.progress(0)
+            
+            # On limite à 5 lignes pour éviter de vider ton crédit OpenAI en test
+            rows_to_process = df.head(5).to_dict(orient="records")
+            
+            for i, row in enumerate(rows_to_process):
+                # Conversion de la ligne en texte
+                row_text = str(row)
+                
+                # Appel IA
+                field_names = ", ".join([f["name"] for f in st.session_state["custom_fields"]])
+                system_prompt = f"Extrais et nettoie : {field_names}. Calcule confidence_score."
+                
+                # --- CORRECTION ICI ---
+                # 1. On définit un placeholder {input_data} dans le prompt
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", system_prompt), 
+                    ("human", "{input_data}") 
+                ])
+                
+                chain = prompt | structured_llm
+                
+                # 2. On injecte la vraie donnée via invoke
+                # LangChain va remplacer {input_data} par row_text proprement
+                res = chain.invoke({"input_data": row_text})
+                # ----------------------
+                
+                # On aplatit le résultat pour le tableau
+                res_dict = res.dict()
+                
+                # Calcul du statut
+                status_text, _ = get_traffic_light(res_dict["confidence_score"], confidence_threshold)
+                res_dict["STATUS"] = status_text 
+                
+                results.append(res_dict)
+                progress_bar.progress((i + 1) / len(rows_to_process))
 
-        # Affichage des étapes
-        st.caption(" > ".join(step_log))
+            # Stockage en session pour l'édition
+            st.session_state["batch_results"] = pd.DataFrame(results)
+            st.success("Traitement terminé !")
+
+    # --- INTERFACE DE REVIEW (DATA EDITOR) ---
+    if st.session_state["batch_results"] is not None:
+        st.divider()
+        st.subheader("🕵️ Interface de Validation (Human-in-the-loop)")
+        st.info("Corrigez les lignes 'À RÉVISER' directement dans le tableau ci-dessous.")
         
-        # Affichage JSON
-        st.json(final_result)
+        # On met la colonne STATUS en premier
+        cols = ['STATUS', 'confidence_score'] + [f['name'] for f in st.session_state["custom_fields"]] + ['risk_flag', 'risk_reason']
+        df_results = st.session_state["batch_results"][cols]
+        
+        # LE TABLEAU ÉDITABLE
+        edited_df = st.data_editor(
+            df_results,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "confidence_score": st.column_config.ProgressColumn(
+                    "Confiance",
+                    help="Score de qualité",
+                    format="%d",
+                    min_value=0,
+                    max_value=100,
+                ),
+                "STATUS": st.column_config.TextColumn(
+                    "Statut",
+                    help="Vert = OK, Orange = Review",
+                    validate="^(🟢 VALIDÉ|🟠 À RÉVISER|🔴 REJETÉ)$"
+                )
+            }
+        )
+        
+        # BOUTON D'EXPORT FINAL
+        csv = edited_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Télécharger les données propres (CSV)",
+            data=csv,
+            file_name='shieldflow_cleaned.csv',
+            mime='text/csv',
+        )
